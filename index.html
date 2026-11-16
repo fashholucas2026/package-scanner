@@ -1,1 +1,231 @@
 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Package Receiving Scanner</title>
+<script src="https://unpkg.com/@zxing/browser@0.1.5/umd/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+body{font-family:Arial;background:#f1f4f8;margin:0;color:#172536}
+header{background:#172536;color:white;padding:22px}
+main{max-width:650px;margin:auto;padding:18px}
+.card{background:white;padding:18px;border-radius:14px;margin-bottom:16px}
+h2{font-size:18px}
+button{padding:14px;border:0;border-radius:9px;background:#1765d1;color:white;font-size:16px;width:100%;margin:6px 0}
+input{width:100%;padding:12px;box-sizing:border-box;border:1px solid #ccd5df;border-radius:8px;font-size:16px}
+label{display:block;margin:12px 0 5px;font-weight:bold;font-size:13px}
+video{width:100%;border-radius:10px;background:#111}
+#status{padding:12px;background:#eaf1fa;border-radius:8px;margin-top:12px}
+.small{font-size:12px;color:#687789}
+</style>
+</head>
+<body>
+<header>
+<h2>Package Receiving</h2>
+<p>Shipping & Receiving Check-In System</p>
+</header>
+<main>
+<div class="card">
+<h2>Scan Package</h2>
+<video id="video" autoplay muted playsinline></video>
+<button onclick="startCamera()">Start Camera</button>
+<button onclick="stopCamera()">Stop Camera</button>
+<div id="status">Ready to scan packages.</div>
+</div>
+
+<div class="card">
+<h2>Package Information</h2>
+
+<label>Date Received</label>
+<input id="date" type="date">
+
+<label>Time Received</label>
+<input id="time" type="time">
+
+<label>Recipient Name</label>
+<input id="recipient" placeholder="Person receiving package">
+
+<label>Sender Organization</label>
+<input id="sender" placeholder="Company that sent package">
+
+<label>Tracking Number</label>
+<input id="tracking" placeholder="Scanned barcode">
+
+<label>Carrier</label>
+<input id="carrier" placeholder="FedEx, UPS, USPS...">
+
+<button onclick="savePackage()">Save Package to Excel</button>
+<p class="small">Records are automatically submitted when the label is successfully recognized and Excel is connected. Otherwise, review and save manually.</p>
+</div>
+
+<div class="card">
+<h2>Excel Connection</h2>
+<label>Power Automate URL</label>
+<input id="flow" placeholder="Add your Microsoft flow URL later">
+<button onclick="saveFlow()">Connect Excel</button>
+<div id="connection">Excel not connected yet.</div>
+</div>
+</main>
+
+<script>
+let camera=null;
+let controls=null;
+let reader=null;
+let busy=false;
+let lastCode="";
+
+function setDate(){
+ const d=new Date();
+ document.getElementById("date").value=
+ d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
+ document.getElementById("time").value=
+ String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0");
+}
+setDate();
+
+document.getElementById("flow").value=localStorage.getItem("excelFlow")||"";
+
+function status(message){
+ document.getElementById("status").innerText=message;
+}
+
+function identifyCarrier(code){
+ if(code.startsWith("1Z"))return "UPS";
+ if(code.length===12||code.length===15||code.length===20||code.length===22)return "FedEx / USPS (check label)";
+ return "Unknown";
+}
+
+async function startCamera(){
+ try{
+  const video=document.getElementById("video");
+  camera=await navigator.mediaDevices.getUserMedia({
+   video:{facingMode:{ideal:"environment"}},audio:false
+  });
+  video.srcObject=camera;
+  await video.play();
+
+  reader=new ZXingBrowser.BrowserMultiFormatReader();
+
+  status("Camera active. Point at the package barcode.");
+
+  controls=await reader.decodeFromVideoElement(video,(result)=>{
+   if(result&&!busy){
+    const code=result.getText();
+    if(code===lastCode)return;
+    lastCode=code;
+    busy=true;
+    document.getElementById("tracking").value=code;
+    document.getElementById("carrier").value=identifyCarrier(code);
+    status("Barcode found. Reading shipping label...");
+    readLabel();
+   }
+  });
+ }catch(error){
+  status("Camera error: "+error.message+". Allow camera access in Safari.");
+ }
+}
+
+async function readLabel(){
+ try{
+  const video=document.getElementById("video");
+  const canvas=document.createElement("canvas");
+  canvas.width=video.videoWidth;
+  canvas.height=video.videoHeight;
+  canvas.getContext("2d").drawImage(video,0,0);
+
+  const result=await Tesseract.recognize(canvas,"eng");
+  const text=result.data.text;
+  const lines=text.split(/\n/).map(x=>x.trim()).filter(Boolean);
+
+  document.getElementById("recipient").value="";
+  document.getElementById("sender").value="";
+
+  const shipTo=lines.findIndex(x=>/SHIP TO|DELIVER TO/i.test(x));
+  const shipFrom=lines.findIndex(x=>/SHIP FROM|SENDER/i.test(x));
+
+  if(shipTo>=0&&lines[shipTo+1])
+   document.getElementById("recipient").value=lines[shipTo+1];
+
+  if(shipFrom>=0&&lines[shipFrom+1])
+   document.getElementById("sender").value=lines[shipFrom+1];
+
+  setDate();
+
+  if(document.getElementById("recipient").value&&
+     document.getElementById("sender").value&&
+     document.getElementById("flow").value){
+    await savePackage();
+  }else{
+    status("Scan complete. Check the recipient and sender, then save.");
+  }
+ }catch(error){
+  status("Label reading failed. Enter missing information manually.");
+ }
+ busy=false;
+}
+
+function saveFlow(){
+ const url=document.getElementById("flow").value.trim();
+ localStorage.setItem("excelFlow",url);
+ document.getElementById("connection").innerText=
+ url?"Flow URL saved.":"Please enter a flow URL.";
+}
+
+async function savePackage(){
+ const url=document.getElementById("flow").value.trim();
+
+ const record={
+  dateReceived:document.getElementById("date").value,
+  timeReceived:document.getElementById("time").value,
+  recipientName:document.getElementById("recipient").value.trim(),
+  senderOrganization:document.getElementById("sender").value.trim(),
+  trackingNumber:document.getElementById("tracking").value.trim(),
+  carrier:document.getElementById("carrier").value.trim(),
+  reviewStatus:"Needs Review"
+ };
+
+ if(!record.trackingNumber||!record.recipientName||!record.senderOrganization){
+  status("Missing information. Check the fields before saving.");
+  return;
+ }
+
+ if(!url){
+  status("Package captured. Excel connection still needs to be configured.");
+  return;
+ }
+
+ try{
+  const response=await fetch(url,{
+   method:"POST",
+   headers:{"Content-Type":"application/json"},
+   body:JSON.stringify(record)
+  });
+
+  if(!response.ok)throw new Error("Excel connection failed");
+
+  status("Package successfully sent to Excel!");
+
+  document.getElementById("recipient").value="";
+  document.getElementById("sender").value="";
+  document.getElementById("tracking").value="";
+  document.getElementById("carrier").value="";
+  lastCode="";
+  setDate();
+ }catch(error){
+  status("Could not confirm Excel save. Check your connection.");
+ }
+}
+
+function stopCamera(){
+ if(controls)controls.stop();
+ if(camera)camera.getTracks().forEach(track=>track.stop());
+ camera=null;
+ controls=null;
+ status("Camera stopped.");
+}
+</script>
+</body>
+</html>
+
